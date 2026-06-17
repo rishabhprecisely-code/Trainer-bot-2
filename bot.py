@@ -5,6 +5,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import pandas as pd
 import yfinance as yf
+import json
+from datetime import datetime
 
 # --- CONFIGURATION ---
 DISCORD_WEBHOOK_URL = os.getenv(
@@ -15,6 +17,9 @@ DISCORD_WEBHOOK_URL = os.getenv(
 SYMBOL = "BTC-USD"
 TIMEFRAME = "1h"  
 CHECK_INTERVAL = 300  # Scan every 5 minutes
+
+# last fetched metrics for status endpoint
+LAST_STATUS = {}
 
 def send_alert(message, embed_color=3447003):
     """Dispatches stylized trade alerts directly to your mobile app channel."""
@@ -38,6 +43,34 @@ def calculate_rsi(prices, window=14):
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
+
+
+def fetch_price_from_coingecko(symbol):
+    """Fallback quick price fetch using CoinGecko market_chart for recent points.
+    Returns dict {'price', 'prev_price', 'prices'} or None on failure.
+    """
+    try:
+        base = symbol.split('-')[0].upper()
+        mapping = {
+            'BTC': 'bitcoin',
+            'ETH': 'ethereum',
+            'DOGE': 'dogecoin',
+            'LTC': 'litecoin'
+        }
+        coin = mapping.get(base, base.lower())
+        url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
+        resp = requests.get(url, params={"vs_currency": "usd", "days": 1, "interval": "hourly"}, timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        prices = data.get('prices', [])
+        if not prices:
+            return None
+        current = float(prices[-1][1])
+        prev = float(prices[-2][1]) if len(prices) > 1 else current
+        return {"price": current, "prev_price": prev, "prices": prices}
+    except Exception:
+        return None
 
 def run_predictive_learning(df):
     """
@@ -77,6 +110,7 @@ def run_predictive_learning(df):
 
 def fetch_and_analyze():
     print(f"Executing secure data extraction protocols for {SYMBOL}...")
+    global LAST_STATUS
     
     # --- HARDENED WEB SCRAPER INTERFACE CONFIGURATION ---
     # We construct custom browser session settings to mimic an active tablet user 
@@ -101,7 +135,31 @@ def fetch_and_analyze():
     )
     
     if df.empty:
-        print("Scraper Warning: Yahoo blocked extraction or data is empty. Retrying next loop.")
+        print("Scraper Warning: Yahoo blocked extraction or data is empty. Trying fallback data source (CoinGecko).")
+        # Fallback: attempt to get current price and recent points from CoinGecko
+        try:
+            cg_price = fetch_price_from_coingecko(SYMBOL)
+            if cg_price is None:
+                print("CoinGecko fallback failed. Retrying next loop.")
+                return
+            # cg_price -> dict with keys: price, prev_price, prices (list)
+            current_price = cg_price['price']
+            prev_price = cg_price.get('prev_price', current_price)
+            direction = 'bullish' if current_price > prev_price else ('bearish' if current_price < prev_price else 'neutral')
+
+            LAST_STATUS = {
+                'symbol': SYMBOL,
+                'price': current_price,
+                'rsi': None,
+                'bull_prob': 50.0,
+                'bear_prob': 50.0,
+                'matches': 0,
+                'direction': direction,
+                'timestamp': datetime.utcnow().isoformat() + 'Z'
+            }
+            print(f"Fallback Live Log -> Price: ${current_price:,.2f} | Direction: {direction}")
+        except Exception as e:
+            print(f"Fallback error: {e}")
         return
 
     # Modern yfinance Index Protection: Flatten columns immediately to avoid extraction structural breaks
@@ -161,13 +219,41 @@ def fetch_and_analyze():
     else:
         print(f"Consolidation mode. Upward probability is {bull_prob:.1f}%. Notification held.")
 
+    # Update global status for external queries
+    direction = "neutral"
+    if is_extreme_oversold or bull_prob > 60:
+        direction = "bullish"
+    elif is_extreme_overbought or bear_prob > 60:
+        direction = "bearish"
+
+    LAST_STATUS = {
+        "symbol": SYMBOL,
+        "price": current_price,
+        "rsi": current_rsi,
+        "bull_prob": round(bull_prob, 2),
+        "bear_prob": round(bear_prob, 2),
+        "matches": matches,
+        "direction": direction,
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+
 # --- RAILWAY HOOKS AND COMPLIANCE ENGINE ---
 class HealthCheckServer(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Bot Status: Operational and Connected.")
+        if self.path == "/status":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            try:
+                payload = LAST_STATUS if LAST_STATUS else {"status": "no data yet"}
+                self.wfile.write(json.dumps(payload).encode())
+            except Exception:
+                self.wfile.write(json.dumps({"status": "error"}).encode())
+        else:
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Bot Status: Operational and Connected.")
     
     def log_message(self, format, *args):
         return  # Suppress terminal bloating
@@ -194,4 +280,3 @@ if __name__ == "__main__":
     httpd = HTTPServer(server_address, HealthCheckServer)
     print(f"Railway Internal Port Routing Engine online on port {railway_port}")
     httpd.serve_forever()
-bot just crashed whili
