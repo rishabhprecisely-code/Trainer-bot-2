@@ -2,12 +2,15 @@ import os
 import time
 import requests
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import pandas as pd
 import yfinance as yf
 
 # --- CONFIGURATION ---
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1516867950706032691/jbkI3AtCR2LPIoLvEzSZkZOU5WpN5w28mJEqrm2tKpYYbTFyuEEQ3vVHl1fsQ0lE4TGJ"
+DISCORD_WEBHOOK_URL = os.getenv(
+    "DISCORD_WEBHOOK_URL",
+    "https://discord.com/api/webhooks/1516867950706032691/jbkI3AtCR2LPIoLvEzSZkZOU5WpN5w28mJEqrm2tKpYYbTFyuEEQ3vVHl1fsQ0lE4TGJ"
+)
 
 SYMBOL = "BTC-USD"
 TIMEFRAME = "1h"  
@@ -191,3 +194,4 @@ if __name__ == "__main__":
     httpd = HTTPServer(server_address, HealthCheckServer)
     print(f"Railway Internal Port Routing Engine online on port {railway_port}")
     httpd.serve_forever()
+bot just crashed whili
