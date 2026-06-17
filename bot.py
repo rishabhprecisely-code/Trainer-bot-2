@@ -29,10 +29,17 @@ DISCORD_WEBHOOK_URL = os.getenv(
 
 SYMBOL = "BTC-USD"
 TIMEFRAME = "1h"  
-CHECK_INTERVAL = 300  # Scan every 5 minutes
+CHECK_INTERVAL = 900  # Scan every 15 minutes
 
 # last fetched metrics for status endpoint
 LAST_STATUS = {}
+
+# Local data cache — reused when a live fetch fails
+_cached_df = None
+
+# Alert cooldown tracking — suppress repeat alerts in the same direction within 1 hour
+_last_alert_time = None
+_last_alert_direction = None
 
 def send_alert(message, embed_color=3447003):
     """Dispatches stylized trade alerts directly to your mobile app channel."""
@@ -123,10 +130,10 @@ def run_predictive_learning(df):
 
 def fetch_and_analyze():
     print(f"Executing secure data extraction protocols for {SYMBOL}...")
-    global LAST_STATUS
-    
+    global LAST_STATUS, _cached_df, _last_alert_time, _last_alert_direction
+
     # --- HARDENED WEB SCRAPER INTERFACE CONFIGURATION ---
-    # We construct custom browser session settings to mimic an active tablet user 
+    # We construct custom browser session settings to mimic an active tablet user
     # and bypass Yahoo's automated firewall filters against hosting providers.
     custom_session = requests.Session()
     custom_session.headers.update({
@@ -136,48 +143,69 @@ def fetch_and_analyze():
         'Origin': 'https://finance.yahoo.com',
         'Referer': 'https://finance.yahoo.com/'
     })
-    
-    # Passing our authenticated session directly into the yfinance download queue
-    try:
-        df = yf.download(
-            tickers=SYMBOL,
-            interval=TIMEFRAME,
-            period="7d",
-            auto_adjust=True,
-            progress=False,
-            session=custom_session,
-        )
-    except Exception as exc:
-        logging.warning("yfinance download failed, trying fallback data source: %s", exc)
-        df = pd.DataFrame()
+
+    # Passing our authenticated session directly into the yfinance download queue.
+    # Exponential backoff on rate-limit errors (429 / "Too Many Requests").
+    df = pd.DataFrame()
+    backoff = 30
+    for attempt in range(4):
+        try:
+            df = yf.download(
+                tickers=SYMBOL,
+                interval=TIMEFRAME,
+                period="7d",
+                auto_adjust=True,
+                progress=False,
+                session=custom_session,
+            )
+            break  # success — exit retry loop
+        except Exception as exc:
+            exc_str = str(exc).lower()
+            if "429" in exc_str or "too many requests" in exc_str or "rate limit" in exc_str:
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                logging.warning(
+                    "[%s] Yahoo Finance rate limit hit (attempt %d/4). "
+                    "Backing off for %ds before retry.",
+                    ts, attempt + 1, backoff
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 300)  # cap at 5 minutes
+            else:
+                logging.warning("yfinance download failed, trying fallback data source: %s", exc)
+                break  # non-rate-limit error — skip retries
 
     if df.empty:
-        print("Scraper Warning: Yahoo blocked extraction or data is empty. Trying fallback data source (CoinGecko).")
-        # Fallback: attempt to get current price and recent points from CoinGecko
-        try:
-            cg_price = fetch_price_from_coingecko(SYMBOL)
-            if cg_price is None:
-                logging.warning("CoinGecko fallback failed. Retrying next loop.")
-                return
-            # cg_price -> dict with keys: price, prev_price, prices (list)
-            current_price = cg_price['price']
-            prev_price = cg_price.get('prev_price', current_price)
-            direction = 'bullish' if current_price > prev_price else ('bearish' if current_price < prev_price else 'neutral')
+        # Try local cache first — allows analysis to continue during API outages
+        if _cached_df is not None and not _cached_df.empty:
+            logging.info("Live fetch failed. Reusing cached DataFrame for analysis.")
+            df = _cached_df
+        else:
+            print("Scraper Warning: Yahoo blocked extraction or data is empty. Trying fallback data source (CoinGecko).")
+            # Fallback: attempt to get current price and recent points from CoinGecko
+            try:
+                cg_price = fetch_price_from_coingecko(SYMBOL)
+                if cg_price is None:
+                    logging.warning("CoinGecko fallback failed. Retrying next loop.")
+                    return
+                # cg_price -> dict with keys: price, prev_price, prices (list)
+                current_price = cg_price['price']
+                prev_price = cg_price.get('prev_price', current_price)
+                direction = 'bullish' if current_price > prev_price else ('bearish' if current_price < prev_price else 'neutral')
 
-            LAST_STATUS = {
-                'symbol': SYMBOL,
-                'price': current_price,
-                'rsi': None,
-                'bull_prob': 50.0,
-                'bear_prob': 50.0,
-                'matches': 0,
-                'direction': direction,
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            print(f"Fallback Live Log -> Price: ${current_price:,.2f} | Direction: {direction}")
-        except Exception as e:
-            print(f"Fallback error: {e}")
-        return
+                LAST_STATUS = {
+                    'symbol': SYMBOL,
+                    'price': current_price,
+                    'rsi': None,
+                    'bull_prob': 50.0,
+                    'bear_prob': 50.0,
+                    'matches': 0,
+                    'direction': direction,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
+                print(f"Fallback Live Log -> Price: ${current_price:,.2f} | Direction: {direction}")
+            except Exception as e:
+                print(f"Fallback error: {e}")
+            return
 
     # Modern yfinance Index Protection: Flatten columns immediately to avoid extraction structural breaks
     if isinstance(df.columns, pd.MultiIndex):
@@ -195,6 +223,9 @@ def fetch_and_analyze():
         print("Data volume check failed following table cleanup.")
         return
 
+    # Persist a clean copy so future failed fetches can fall back to it
+    _cached_df = df.copy()
+
     current_price = float(df['close'].iloc[-1])
     current_rsi = float(df['rsi'].iloc[-1])
     prev_rsi = float(df['rsi'].iloc[-2])
@@ -203,12 +234,29 @@ def fetch_and_analyze():
     bull_prob, bear_prob, matches = run_predictive_learning(df)
     print(f"Scraper Live Log -> Price: ${current_price:,.2f} | RSI: {current_rsi:.2f}")
     
-    # Define Alert Boundaries
-    is_extreme_oversold = current_rsi <= 25 or (prev_rsi < 30 and current_rsi >= 30)
-    is_extreme_overbought = current_rsi >= 75 or (prev_rsi > 70 and current_rsi <= 70)
-    
-    # --- DYNAMIC SIGNAL EVALUATION ---
+    # Define Alert Boundaries (30/70 thresholds for better signal responsiveness)
+    is_extreme_oversold = current_rsi <= 30 or (prev_rsi < 35 and current_rsi >= 35)
+    is_extreme_overbought = current_rsi >= 70 or (prev_rsi > 65 and current_rsi <= 65)
+
+    # Determine signal direction before deciding whether to alert
     if is_extreme_oversold or bull_prob > 60:
+        signal_direction = "bullish"
+    elif is_extreme_overbought or bear_prob > 60:
+        signal_direction = "bearish"
+    else:
+        signal_direction = None
+
+    # Alert cooldown — suppress repeat alerts for the same direction within 1 hour
+    now = datetime.now(timezone.utc)
+    cooldown_active = (
+        signal_direction is not None
+        and _last_alert_direction == signal_direction
+        and _last_alert_time is not None
+        and (now - _last_alert_time).total_seconds() < 3600
+    )
+
+    # --- DYNAMIC SIGNAL EVALUATION ---
+    if signal_direction == "bullish" and not cooldown_active:
         msg = (
             f"📈 **RECOMMENDED ACTION: BUY / LONG**\n\n"
             f"**Asset Target:** {SYMBOL}\n"
@@ -220,8 +268,10 @@ def fetch_and_analyze():
             f"🎯 *Directional Outlook:* Strong bullish reversal pressure expected next hour."
         )
         send_alert(msg, embed_color=3066993)
-    
-    elif is_extreme_overbought or bear_prob > 60:
+        _last_alert_time = now
+        _last_alert_direction = "bullish"
+
+    elif signal_direction == "bearish" and not cooldown_active:
         msg = (
             f"📉 **RECOMMENDED ACTION: SELL / SHORT**\n\n"
             f"**Asset Target:** {SYMBOL}\n"
@@ -233,15 +283,15 @@ def fetch_and_analyze():
             f"🎯 *Directional Outlook:* Strong bearish distribution pressure expected next hour."
         )
         send_alert(msg, embed_color=15158332)
+        _last_alert_time = now
+        _last_alert_direction = "bearish"
+    elif cooldown_active:
+        print(f"Alert cooldown active for {signal_direction} signal. Suppressing duplicate alert.")
     else:
         print(f"Consolidation mode. Upward probability is {bull_prob:.1f}%. Notification held.")
 
     # Update global status for external queries
-    direction = "neutral"
-    if is_extreme_oversold or bull_prob > 60:
-        direction = "bullish"
-    elif is_extreme_overbought or bear_prob > 60:
-        direction = "bearish"
+    direction = signal_direction if signal_direction is not None else "neutral"
 
     LAST_STATUS = {
         "symbol": SYMBOL,
