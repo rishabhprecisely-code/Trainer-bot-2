@@ -8,6 +8,7 @@ import yfinance as yf
 import json
 import sys
 import logging
+import statistics
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
@@ -121,6 +122,9 @@ def run_predictive_learning(df):
     historical_up_moves = 0
     historical_down_moves = 0
     total_matches = 0
+    # accumulate fractional percent changes (price_1h_later - price_then) / price_then
+    sum_frac_changes = 0.0
+    list_frac_changes = []
     
     for i in range(15, len(df) - 1):
         hist_rsi = float(df['rsi'].iloc[i])
@@ -130,6 +134,9 @@ def run_predictive_learning(df):
             price_1h_later = float(df['close'].iloc[i+1])
             
             total_matches += 1
+            frac_change = (price_1h_later - price_then) / price_then
+            sum_frac_changes += frac_change
+            list_frac_changes.append(frac_change)
             if price_1h_later > price_then:
                 historical_up_moves += 1
             else:
@@ -138,10 +145,19 @@ def run_predictive_learning(df):
     if total_matches > 0:
         bullish_probability = (historical_up_moves / total_matches) * 100
         bearish_probability = (historical_down_moves / total_matches) * 100
+        # average percent change across matching instances (as percentage)
+        avg_pct_change = (sum_frac_changes / total_matches) * 100
+        # volatility as population standard deviation of fractional changes (percentage)
+        try:
+            vol_pct = statistics.pstdev(list_frac_changes) * 100
+        except Exception:
+            vol_pct = 0.0
     else:
         bullish_probability, bearish_probability = 50.0, 50.0
-    
-    return bullish_probability, bearish_probability, total_matches
+        avg_pct_change = 0.0
+        vol_pct = 0.0
+
+    return bullish_probability, bearish_probability, total_matches, avg_pct_change, vol_pct
 
 def fetch_and_analyze():
     print(f"Executing secure data extraction protocols for {SYMBOL}...")
@@ -204,7 +220,14 @@ def fetch_and_analyze():
     prev_rsi = float(df['rsi'].iloc[-2])
 
     # Execute Self-Learning Trend Computations
-    bull_prob, bear_prob, matches = run_predictive_learning(df)
+    bull_prob, bear_prob, matches, avg_pct_change, vol_pct = run_predictive_learning(df)
+    expected_target = None
+    expected_range_low = None
+    expected_range_high = None
+    if matches > 0:
+        expected_target = current_price * (1 + (avg_pct_change / 100.0))
+        expected_range_low = current_price * (1 + ((avg_pct_change - vol_pct) / 100.0))
+        expected_range_high = current_price * (1 + ((avg_pct_change + vol_pct) / 100.0))
     logging.info("Scraper Live Log -> Price: $%s | RSI: %.2f", f"{current_price:,.2f}", current_rsi)
     
     # Define Alert Boundaries
@@ -213,11 +236,19 @@ def fetch_and_analyze():
     
     # --- DYNAMIC SIGNAL EVALUATION ---
     if is_extreme_oversold or bull_prob > 60:
+        exp_line = ""
+        if expected_target is not None:
+            exp_line = (
+                f"**Expected Target (1h):** ${expected_target:,.2f} ({avg_pct_change:+.2f}% avg, volatility {vol_pct:.2f}%)\n"
+                f"**Expected Range (1h):** ${expected_range_low:,.2f} — ${expected_range_high:,.2f}\n\n"
+            )
+
         msg = (
             f"📈 **RECOMMENDED ACTION: BUY / LONG**\n\n"
             f"**Asset Target:** {SYMBOL}\n"
             f"**Current Price:** ${current_price:,.2f}\n"
-            f"**Current RSI Value:** {current_rsi:.2f}\n\n"
+            f"**Current RSI Value:** {current_rsi:.2f}\n"
+            f"{exp_line}"
             f"📊 **Predictive Pattern Learning:**\n"
             f"The scraper verified **{matches} matches** over the last 7 days matching this exact RSI profile. "
             f"Historically, the market shifted **UPWARD within the next hour {bull_prob:.1f}% of the time**.\n\n"
@@ -226,11 +257,19 @@ def fetch_and_analyze():
         send_alert(msg, embed_color=3066993)
     
     elif is_extreme_overbought or bear_prob > 60:
+        exp_line = ""
+        if expected_target is not None:
+            exp_line = (
+                f"**Expected Target (1h):** ${expected_target:,.2f} ({avg_pct_change:+.2f}% avg, volatility {vol_pct:.2f}%)\n"
+                f"**Expected Range (1h):** ${expected_range_low:,.2f} — ${expected_range_high:,.2f}\n\n"
+            )
+
         msg = (
             f"📉 **RECOMMENDED ACTION: SELL / SHORT**\n\n"
             f"**Asset Target:** {SYMBOL}\n"
             f"**Current Price:** ${current_price:,.2f}\n"
-            f"**Current RSI Value:** {current_rsi:.2f}\n\n"
+            f"**Current RSI Value:** {current_rsi:.2f}\n"
+            f"{exp_line}"
             f"📊 **Predictive Pattern Learning:**\n"
             f"The scraper verified **{matches} matches** over the last 7 days matching this exact RSI profile. "
             f"Historically, the market shifted **DOWNWARD within the next hour {bear_prob:.1f}% of the time**.\n\n"
@@ -254,6 +293,11 @@ def fetch_and_analyze():
         "bull_prob": round(bull_prob, 2),
         "bear_prob": round(bear_prob, 2),
         "matches": matches,
+        "avg_pct_change": round(avg_pct_change, 2),
+        "volatility_pct": round(vol_pct, 2),
+        "expected_target": round(expected_target, 2) if expected_target is not None else None,
+        "expected_range_low": round(expected_range_low, 2) if expected_range_low is not None else None,
+        "expected_range_high": round(expected_range_high, 2) if expected_range_high is not None else None,
         "direction": direction,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
