@@ -93,6 +93,7 @@ Notes:
 - When deploying under a process manager, prefer using the `PORT` env var to control the listen port.
 - Set `DISCORD_WEBHOOK_URL` to your webhook URL for alert delivery.
 - Set `STATUS_TOKEN` to protect the `/status` endpoint via `Authorization: Bearer <STATUS_TOKEN>` or `?token=<STATUS_TOKEN>`.
+- Use `DATA_SOURCE=coingecko` when running in Railway or other restricted environments to avoid yfinance rate limits.
 - Logs are written to the `logs/` directory with rotation (`logs/bot.log`). Configure your log collector or mount a volume when using Docker.
 
 ### Deployment

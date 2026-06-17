@@ -58,9 +58,9 @@ def calculate_rsi(prices, window=14):
     return 100 - (100 / (1 + rs))
 
 
-def fetch_price_from_coingecko(symbol):
-    """Fallback quick price fetch using CoinGecko market_chart for recent points.
-    Returns dict {'price', 'prev_price', 'prices'} or None on failure.
+def fetch_coingecko_price_data(symbol, days=7, interval='hourly'):
+    """Fetch historical price data from CoinGecko for fallback analysis.
+    Returns a DataFrame with columns [open, high, low, close, volume] or None on failure.
     """
     try:
         base = symbol.split('-')[0].upper()
@@ -72,17 +72,39 @@ def fetch_price_from_coingecko(symbol):
         }
         coin = mapping.get(base, base.lower())
         url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
-        resp = requests.get(url, params={"vs_currency": "usd", "days": 1, "interval": "hourly"}, timeout=10)
+        resp = requests.get(
+            url,
+            params={"vs_currency": "usd", "days": days, "interval": interval},
+            timeout=15,
+        )
         if resp.status_code != 200:
+            logging.warning("CoinGecko API returned status %s for %s", resp.status_code, symbol)
             return None
+
         data = resp.json()
         prices = data.get('prices', [])
         if not prices:
+            logging.warning("CoinGecko returned empty price data for %s", symbol)
             return None
-        current = float(prices[-1][1])
-        prev = float(prices[-2][1]) if len(prices) > 1 else current
-        return {"price": current, "prev_price": prev, "prices": prices}
-    except Exception:
+
+        df = pd.DataFrame(prices, columns=['timestamp', 'close'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        df['close'] = df['close'].astype(float)
+
+        volumes = data.get('total_volumes', [])
+        if volumes:
+            volume_df = pd.DataFrame(volumes, columns=['timestamp', 'volume'])
+            volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'], unit='ms', utc=True)
+            df = df.merge(volume_df, on='timestamp', how='left')
+        else:
+            df['volume'] = 0.0
+
+        df['open'] = df['close']
+        df['high'] = df['close']
+        df['low'] = df['close']
+        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+    except Exception as exc:
+        logging.warning("CoinGecko fetch failed for %s: %s", symbol, exc)
         return None
 
 def run_predictive_learning(df):
@@ -137,47 +159,30 @@ def fetch_and_analyze():
         'Referer': 'https://finance.yahoo.com/'
     })
     
-    # Passing our authenticated session directly into the yfinance download queue
-    try:
-        df = yf.download(
-            tickers=SYMBOL,
-            interval=TIMEFRAME,
-            period="7d",
-            auto_adjust=True,
-            progress=False,
-            session=custom_session,
-        )
-    except Exception as exc:
-        logging.warning("yfinance download failed, trying fallback data source: %s", exc)
-        df = pd.DataFrame()
+    primary_data_source = os.getenv("DATA_SOURCE", "yfinance").strip().lower()
+    df = pd.DataFrame()
+
+    if primary_data_source != "coingecko":
+        try:
+            df = yf.download(
+                tickers=SYMBOL,
+                interval=TIMEFRAME,
+                period="7d",
+                auto_adjust=True,
+                progress=False,
+                session=custom_session,
+            )
+        except Exception as exc:
+            logging.warning("yfinance download failed, trying fallback data source: %s", exc)
+            df = pd.DataFrame()
 
     if df.empty:
-        print("Scraper Warning: Yahoo blocked extraction or data is empty. Trying fallback data source (CoinGecko).")
-        # Fallback: attempt to get current price and recent points from CoinGecko
-        try:
-            cg_price = fetch_price_from_coingecko(SYMBOL)
-            if cg_price is None:
-                logging.warning("CoinGecko fallback failed. Retrying next loop.")
-                return
-            # cg_price -> dict with keys: price, prev_price, prices (list)
-            current_price = cg_price['price']
-            prev_price = cg_price.get('prev_price', current_price)
-            direction = 'bullish' if current_price > prev_price else ('bearish' if current_price < prev_price else 'neutral')
-
-            LAST_STATUS = {
-                'symbol': SYMBOL,
-                'price': current_price,
-                'rsi': None,
-                'bull_prob': 50.0,
-                'bear_prob': 50.0,
-                'matches': 0,
-                'direction': direction,
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            print(f"Fallback Live Log -> Price: ${current_price:,.2f} | Direction: {direction}")
-        except Exception as e:
-            print(f"Fallback error: {e}")
-        return
+        logging.info("Yahoo data unavailable or empty. Trying fallback data source: CoinGecko.")
+        df = fetch_coingecko_price_data(SYMBOL, days=7, interval="hourly")
+        if df is None or df.empty:
+            logging.warning("CoinGecko fallback failed. Retrying next loop.")
+            return
+        logging.info("CoinGecko fallback succeeded with %s hourly points.", len(df))
 
     # Modern yfinance Index Protection: Flatten columns immediately to avoid extraction structural breaks
     if isinstance(df.columns, pd.MultiIndex):
@@ -186,22 +191,21 @@ def fetch_and_analyze():
     # Standardize data tables
     df.columns = [str(col).lower() for col in df.columns]
     df = df[['open', 'high', 'low', 'close', 'volume']].copy()
-    
     df['close'] = df['close'].astype(float)
     df['rsi'] = calculate_rsi(df['close'])
     df = df.dropna(subset=['rsi']).copy()
-    
+
     if len(df) < 5:
-        print("Data volume check failed following table cleanup.")
+        logging.warning("Data volume check failed following table cleanup.")
         return
 
     current_price = float(df['close'].iloc[-1])
     current_rsi = float(df['rsi'].iloc[-1])
     prev_rsi = float(df['rsi'].iloc[-2])
-    
+
     # Execute Self-Learning Trend Computations
     bull_prob, bear_prob, matches = run_predictive_learning(df)
-    print(f"Scraper Live Log -> Price: ${current_price:,.2f} | RSI: {current_rsi:.2f}")
+    logging.info("Scraper Live Log -> Price: $%s | RSI: %.2f", f"{current_price:,.2f}", current_rsi)
     
     # Define Alert Boundaries
     is_extreme_oversold = current_rsi <= 25 or (prev_rsi < 30 and current_rsi >= 30)

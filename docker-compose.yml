@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   trainer-bot:
     build: .
@@ -8,4 +7,5 @@ services:
       - PORT=8080
       - STATUS_TOKEN=your-secret-token
       - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your-hook
+      - DATA_SOURCE=coingecko
     restart: unless-stopped
