@@ -1,0 +1,11 @@
+version: "3.8"
+services:
+  trainer-bot:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - STATUS_TOKEN=your-secret-token
+      - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your-hook
+    restart: unless-stopped

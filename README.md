@@ -52,8 +52,9 @@ Dockerfile example:
 ```
 FROM python:3.12-slim
 WORKDIR /app
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
-	RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 8080
 CMD ["python3", "bot.py"]
 ```
@@ -63,6 +64,28 @@ Docker run (map host port if desired):
 ```bash
 docker build -t trainer-bot .
 docker run -d -p 8080:8080 --name trainer-bot trainer-bot
+```
+
+Docker Compose example:
+
+```yaml
+version: "3.8"
+services:
+  trainer-bot:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - STATUS_TOKEN=your-secret-token
+      - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your-hook
+    restart: unless-stopped
+```
+
+Start with:
+
+```bash
+docker compose up --build -d
 ```
 
 Notes:
