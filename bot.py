@@ -6,7 +6,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import pandas as pd
 import yfinance as yf
 import json
+import sys
+import logging
 from datetime import datetime
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
 # --- CONFIGURATION ---
 DISCORD_WEBHOOK_URL = os.getenv(
@@ -270,13 +274,37 @@ def primary_bot_loop():
             time.sleep(60)
 
 if __name__ == "__main__":
-    railway_port = int(os.getenv("PORT", 8080))
-    
+    base_port = int(os.getenv("PORT", 8080))
+
     bot_thread = threading.Thread(target=primary_bot_loop)
     bot_thread.daemon = True
     bot_thread.start()
-    
-    server_address = ('0.0.0.0', railway_port)
-    httpd = HTTPServer(server_address, HealthCheckServer)
-    print(f"Railway Internal Port Routing Engine online on port {railway_port}")
-    httpd.serve_forever()
+
+    # Try to bind to a sequence of ports (base_port .. base_port+9) to avoid
+    # immediate failure if the default port is already in use.
+    httpd = None
+    bound_port = None
+    for port in range(base_port, base_port + 10):
+        try:
+            server_address = ('0.0.0.0', port)
+            httpd = HTTPServer(server_address, HealthCheckServer)
+            bound_port = port
+            break
+        except OSError as e:
+            logging.warning(f"Port {port} not available: {e}")
+            continue
+
+    if httpd is None:
+        logging.error(f"Failed to bind to any port in range {base_port}-{base_port+9}. Exiting.")
+        sys.exit(1)
+
+    try:
+        logging.info(f"Railway Internal Port Routing Engine online on port {bound_port}")
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        logging.info("Shutdown requested by user, stopping server.")
+    finally:
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
