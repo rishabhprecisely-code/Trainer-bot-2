@@ -7,7 +7,7 @@ import pandas as pd
 import yfinance as yf
 
 # --- CONFIGURATION ---
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1516519439963783361/8x8Kz3MNwbiKdtSnDQKQe3fbMCvUiHcqbZe9Lii4rJ8pF-NcWe-8GAjjmxzT98-C7igK"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1516867950706032691/jbkI3AtCR2LPIoLvEzSZkZOU5WpN5w28mJEqrm2tKpYYbTFyuEEQ3vVHl1fsQ0lE4TGJ"
 
 SYMBOL = "BTC-USD"
 TIMEFRAME = "1h"  
