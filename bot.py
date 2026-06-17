@@ -2,15 +2,24 @@ import os
 import time
 import requests
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import pandas as pd
 import yfinance as yf
 import json
 import sys
 import logging
-from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from datetime import datetime, timezone
+from urllib.parse import urlparse, parse_qs
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+
+# Add rotating file handler
+log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+os.makedirs(log_dir, exist_ok=True)
+file_handler = RotatingFileHandler(os.path.join(log_dir, 'bot.log'), maxBytes=5_000_000, backupCount=3)
+file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
+logging.getLogger().addHandler(file_handler)
 
 # --- CONFIGURATION ---
 DISCORD_WEBHOOK_URL = os.getenv(
@@ -129,22 +138,26 @@ def fetch_and_analyze():
     })
     
     # Passing our authenticated session directly into the yfinance download queue
-    df = yf.download(
-        tickers=SYMBOL, 
-        interval=TIMEFRAME, 
-        period="7d", 
-        auto_adjust=True,
-        progress=False,
-        session=custom_session
-    )
-    
+    try:
+        df = yf.download(
+            tickers=SYMBOL,
+            interval=TIMEFRAME,
+            period="7d",
+            auto_adjust=True,
+            progress=False,
+            session=custom_session,
+        )
+    except Exception as exc:
+        logging.warning("yfinance download failed, trying fallback data source: %s", exc)
+        df = pd.DataFrame()
+
     if df.empty:
         print("Scraper Warning: Yahoo blocked extraction or data is empty. Trying fallback data source (CoinGecko).")
         # Fallback: attempt to get current price and recent points from CoinGecko
         try:
             cg_price = fetch_price_from_coingecko(SYMBOL)
             if cg_price is None:
-                print("CoinGecko fallback failed. Retrying next loop.")
+                logging.warning("CoinGecko fallback failed. Retrying next loop.")
                 return
             # cg_price -> dict with keys: price, prev_price, prices (list)
             current_price = cg_price['price']
@@ -159,7 +172,7 @@ def fetch_and_analyze():
                 'bear_prob': 50.0,
                 'matches': 0,
                 'direction': direction,
-                'timestamp': datetime.utcnow().isoformat() + 'Z'
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
             print(f"Fallback Live Log -> Price: ${current_price:,.2f} | Direction: {direction}")
         except Exception as e:
@@ -238,13 +251,22 @@ def fetch_and_analyze():
         "bear_prob": round(bear_prob, 2),
         "matches": matches,
         "direction": direction,
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 # --- RAILWAY HOOKS AND COMPLIANCE ENGINE ---
 class HealthCheckServer(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/status":
+        parsed = urlparse(self.path)
+        if parsed.path == "/status":
+            # Verify token if configured
+            if not verify_status_request(self.headers, parse_qs(parsed.query)):
+                self.send_response(401)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "unauthorized"}).encode())
+                return
+
             self.send_response(200)
             self.send_header("Content-type", "application/json")
             self.end_headers()
@@ -262,6 +284,29 @@ class HealthCheckServer(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return  # Suppress terminal bloating
 
+
+def verify_status_request(headers, query_params):
+    """Return True if request is authorized to access /status.
+    Uses env var STATUS_TOKEN. If not set, allow all requests.
+    Accepts token via Authorization: Bearer <token> header or ?token=<token> query param.
+    """
+    token = os.getenv('STATUS_TOKEN')
+    if not token:
+        return True
+
+    # Check header
+    auth = headers.get('Authorization')
+    if auth and auth.strip().lower().startswith('bearer '):
+        supplied = auth.strip()[7:]
+        return supplied == token
+
+    # Check query param
+    q = query_params.get('token')
+    if q and q[0] == token:
+        return True
+
+    return False
+
 def primary_bot_loop():
     time.sleep(5)
     send_alert("🤖 **Self-Learning Scraper Bot initialized successfully! Tracking open web data profiles...**")
@@ -274,7 +319,11 @@ def primary_bot_loop():
             time.sleep(60)
 
 if __name__ == "__main__":
-    base_port = int(os.getenv("PORT", 8080))
+    try:
+        base_port = int(os.getenv("PORT", 8080))
+    except ValueError:
+        logging.warning("Invalid PORT environment variable, defaulting to 8080")
+        base_port = 8080
 
     bot_thread = threading.Thread(target=primary_bot_loop)
     bot_thread.daemon = True
@@ -282,6 +331,7 @@ if __name__ == "__main__":
 
     # Try to bind to a sequence of ports (base_port .. base_port+9) to avoid
     # immediate failure if the default port is already in use.
+    HTTPServer.allow_reuse_address = True
     httpd = None
     bound_port = None
     for port in range(base_port, base_port + 10):
@@ -299,10 +349,13 @@ if __name__ == "__main__":
         sys.exit(1)
 
     try:
+        httpd.allow_reuse_address = True
         logging.info(f"Railway Internal Port Routing Engine online on port {bound_port}")
         httpd.serve_forever()
     except KeyboardInterrupt:
         logging.info("Shutdown requested by user, stopping server.")
+    except Exception as exc:
+        logging.error("HTTP server error: %s", exc)
     finally:
         try:
             httpd.shutdown()
