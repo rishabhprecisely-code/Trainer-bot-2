@@ -22,8 +22,35 @@ file_handler = RotatingFileHandler(os.path.join(log_dir, 'bot.log'), maxBytes=5_
 file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
 logging.getLogger().addHandler(file_handler)
 
+
+def load_local_env():
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    if not os.path.exists(env_path):
+        return
+
+    try:
+        with open(env_path, 'r', encoding='utf-8') as env_file:
+            for line in env_file:
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#') or '=' not in stripped:
+                    continue
+                key, value = stripped.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+        logging.info('Loaded local .env file for missing environment variables.')
+    except Exception as exc:
+        logging.warning('Failed to load local .env file: %s', exc)
+
+
 # --- CONFIGURATION ---
+load_local_env()
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip() or None
+if DISCORD_WEBHOOK_URL:
+    logging.info('Discord webhook is configured and ready for alert dispatch.')
+else:
+    logging.warning('Discord webhook URL is not configured; alert dispatch will be skipped.')
 
 SYMBOL = "BTC-USD"
 TIMEFRAME = "1h"
