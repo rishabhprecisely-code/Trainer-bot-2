@@ -15,3 +15,37 @@ def test_calculate_rsi_basic():
     assert hasattr(rsi, 'iloc')
     last = float(rsi.iloc[-1])
     assert 0.0 <= last <= 100.0
+
+
+def test_fetch_coingecko_fallback_to_yfinance(monkeypatch):
+    import bot
+
+    class DummyResponse:
+        status_code = 429
+        def json(self):
+            return {}
+
+    class DummySession:
+        def __init__(self):
+            self.headers = {}
+
+        def get(self, url, params=None, timeout=None):
+            return DummyResponse()
+
+    def dummy_download(*args, **kwargs):
+        return pd.DataFrame({
+            'Open': [1.0 + i for i in range(20)],
+            'High': [1.0 + i for i in range(20)],
+            'Low': [1.0 + i for i in range(20)],
+            'Close': [1.0 + i for i in range(20)],
+            'Volume': [1000] * 20,
+        })
+
+    monkeypatch.setattr(bot, 'build_request_session', lambda: DummySession())
+    monkeypatch.setattr(bot, 'DEFAULT_DATA_SOURCE', 'coingecko')
+    monkeypatch.setattr(bot.yf, 'download', dummy_download)
+    monkeypatch.setattr(bot, 'send_alert', lambda *args, **kwargs: None)
+
+    bot.fetch_and_analyze()
+    assert bot.LAST_STATUS.get('symbol') == 'BTC-USD'
+    assert bot.LAST_STATUS.get('direction') in {'bullish', 'bearish', 'neutral'}

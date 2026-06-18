@@ -28,6 +28,9 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip() or None
 SYMBOL = "BTC-USD"
 TIMEFRAME = "1h"
 CHECK_INTERVAL = 300  # Scan every 5 minutes
+DEFAULT_DATA_SOURCE = os.getenv("DATA_SOURCE", "coingecko").strip().lower()
+FETCH_RETRY_COUNT = 3
+FETCH_RETRY_DELAY = 2
 
 # last fetched metrics for status endpoint
 LAST_STATUS = {}
@@ -62,54 +65,77 @@ def calculate_rsi(prices, window=14):
     return 100 - (100 / (1 + rs))
 
 
+def build_request_session():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (iPad; CPU OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/605.1.15',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Origin': 'https://finance.yahoo.com',
+        'Referer': 'https://finance.yahoo.com/'
+    })
+    return session
+
+
 def fetch_coingecko_price_data(symbol, days=7, interval='hourly'):
     """Fetch historical price data from CoinGecko for fallback analysis.
     Returns a DataFrame with columns [open, high, low, close, volume] or None on failure.
     """
-    try:
-        base = symbol.split('-')[0].upper()
-        mapping = {
-            'BTC': 'bitcoin',
-            'ETH': 'ethereum',
-            'DOGE': 'dogecoin',
-            'LTC': 'litecoin'
-        }
-        coin = mapping.get(base, base.lower())
-        url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
-        resp = requests.get(
-            url,
-            params={"vs_currency": "usd", "days": days, "interval": interval},
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            logging.warning("CoinGecko API returned status %s for %s", resp.status_code, symbol)
-            return None
+    base = symbol.split('-')[0].upper()
+    mapping = {
+        'BTC': 'bitcoin',
+        'ETH': 'ethereum',
+        'DOGE': 'dogecoin',
+        'LTC': 'litecoin'
+    }
+    coin = mapping.get(base, base.lower())
+    url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
+    session = build_request_session()
 
-        data = resp.json()
-        prices = data.get('prices', [])
-        if not prices:
-            logging.warning("CoinGecko returned empty price data for %s", symbol)
-            return None
+    for attempt in range(1, FETCH_RETRY_COUNT + 1):
+        try:
+            resp = session.get(
+                url,
+                params={"vs_currency": "usd", "days": days, "interval": interval},
+                timeout=15,
+            )
+            if resp.status_code == 429:
+                logging.warning("CoinGecko rate limited on attempt %s/%s for %s", attempt, FETCH_RETRY_COUNT, symbol)
+            elif resp.status_code != 200:
+                logging.warning("CoinGecko API returned status %s for %s", resp.status_code, symbol)
+            else:
+                data = resp.json()
+                prices = data.get('prices', [])
+                if not prices:
+                    logging.warning("CoinGecko returned empty price data for %s", symbol)
+                else:
+                    df = pd.DataFrame(prices, columns=['timestamp', 'close'])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+                    df['close'] = df['close'].astype(float)
 
-        df = pd.DataFrame(prices, columns=['timestamp', 'close'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-        df['close'] = df['close'].astype(float)
+                    volumes = data.get('total_volumes', [])
+                    if volumes:
+                        volume_df = pd.DataFrame(volumes, columns=['timestamp', 'volume'])
+                        volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'], unit='ms', utc=True)
+                        df = df.merge(volume_df, on='timestamp', how='left')
+                    else:
+                        df['volume'] = 0.0
 
-        volumes = data.get('total_volumes', [])
-        if volumes:
-            volume_df = pd.DataFrame(volumes, columns=['timestamp', 'volume'])
-            volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'], unit='ms', utc=True)
-            df = df.merge(volume_df, on='timestamp', how='left')
-        else:
-            df['volume'] = 0.0
+                    df = df.sort_values('timestamp').drop_duplicates('timestamp').reset_index(drop=True)
+                    df['open'] = df['close']
+                    df['high'] = df['close']
+                    df['low'] = df['close']
+                    return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        except requests.RequestException as exc:
+            logging.warning("CoinGecko request failed for %s (attempt %s/%s): %s", symbol, attempt, FETCH_RETRY_COUNT, exc)
+        except ValueError as exc:
+            logging.warning("CoinGecko returned invalid JSON for %s: %s", symbol, exc)
 
-        df['open'] = df['close']
-        df['high'] = df['close']
-        df['low'] = df['close']
-        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-    except Exception as exc:
-        logging.warning("CoinGecko fetch failed for %s: %s", symbol, exc)
-        return None
+        if attempt < FETCH_RETRY_COUNT:
+            time.sleep(FETCH_RETRY_DELAY)
+
+    logging.warning("CoinGecko data fetch failed after %s attempts for %s", FETCH_RETRY_COUNT, symbol)
+    return None
 
 def run_predictive_learning(df):
     """
@@ -178,10 +204,26 @@ def fetch_and_analyze():
         'Referer': 'https://finance.yahoo.com/'
     })
     
-    primary_data_source = os.getenv("DATA_SOURCE", "yfinance").strip().lower()
+    primary_data_source = DEFAULT_DATA_SOURCE
     df = pd.DataFrame()
 
-    if primary_data_source != "coingecko":
+    if primary_data_source == "coingecko":
+        df = fetch_coingecko_price_data(SYMBOL, days=7, interval="hourly")
+        if df is None or df.empty:
+            logging.warning("Primary source CoinGecko failed; trying yfinance fallback.")
+            try:
+                df = yf.download(
+                    tickers=SYMBOL,
+                    interval=TIMEFRAME,
+                    period="7d",
+                    auto_adjust=True,
+                    progress=False,
+                    session=custom_session,
+                )
+            except Exception as exc:
+                logging.warning("Fallback yfinance download failed: %s", exc)
+                df = pd.DataFrame()
+    else:
         try:
             df = yf.download(
                 tickers=SYMBOL,
@@ -195,13 +237,13 @@ def fetch_and_analyze():
             logging.warning("yfinance download failed, trying fallback data source: %s", exc)
             df = pd.DataFrame()
 
-    if df.empty:
-        logging.info("Yahoo data unavailable or empty. Trying fallback data source: CoinGecko.")
-        df = fetch_coingecko_price_data(SYMBOL, days=7, interval="hourly")
-        if df is None or df.empty:
-            logging.warning("CoinGecko fallback failed. Retrying next loop.")
-            return
-        logging.info("CoinGecko fallback succeeded with %s hourly points.", len(df))
+        if df.empty:
+            logging.info("Yahoo data unavailable or empty. Trying fallback data source: CoinGecko.")
+            df = fetch_coingecko_price_data(SYMBOL, days=7, interval="hourly")
+            if df is None or df.empty:
+                logging.warning("CoinGecko fallback failed. Retrying next loop.")
+                return
+            logging.info("CoinGecko fallback succeeded with %s hourly points.", len(df))
 
     # Modern yfinance Index Protection: Flatten columns immediately to avoid extraction structural breaks
     if isinstance(df.columns, pd.MultiIndex):
