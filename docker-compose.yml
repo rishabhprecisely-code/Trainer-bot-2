@@ -3,9 +3,10 @@ services:
     build: .
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
       - PORT=8080
       - STATUS_TOKEN=your-secret-token
-      - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your-hook
       - DATA_SOURCE=coingecko
     restart: unless-stopped
