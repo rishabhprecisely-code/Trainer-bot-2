@@ -23,13 +23,10 @@ file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(messag
 logging.getLogger().addHandler(file_handler)
 
 # --- CONFIGURATION ---
-DISCORD_WEBHOOK_URL = os.getenv(
-    "DISCORD_WEBHOOK_URL",
-    "https://discord.com/api/webhooks/1516867950706032691/jbkI3AtCR2LPIoLvEzSZkZOU5WpN5w28mJEqrm2tKpYYbTFyuEEQ3vVHl1fsQ0lE4TGJ"
-)
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip() or None
 
 SYMBOL = "BTC-USD"
-TIMEFRAME = "1h"  
+TIMEFRAME = "1h"
 CHECK_INTERVAL = 300  # Scan every 5 minutes
 
 # last fetched metrics for status endpoint
@@ -37,18 +34,24 @@ LAST_STATUS = {}
 
 def send_alert(message, embed_color=3447003):
     """Dispatches stylized trade alerts directly to your mobile app channel."""
+    if not DISCORD_WEBHOOK_URL:
+        logging.warning("Discord webhook URL is not configured; skipping alert.")
+        return
+
     data = {
         "embeds": [{
             "title": "🧠 SYSTEM PREDICTION ENGINE 🧠",
             "description": message,
-            "color": embed_color, 
+            "color": embed_color,
             "footer": {"text": "Yahoo Finance Secure Scraper Engine"}
         }]
     }
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json=data, timeout=10)
-    except Exception as e:
-        print(f"Network dispatch failure: {e}")
+        resp = requests.post(DISCORD_WEBHOOK_URL, json=data, timeout=10)
+        if resp.status_code >= 400:
+            logging.warning("Discord webhook request failed with status %s: %s", resp.status_code, resp.text)
+    except Exception:
+        logging.exception("Network dispatch failure while sending alert")
 
 def calculate_rsi(prices, window=14):
     """Helper mathematical function to calculate clean RSI arrays."""
@@ -367,22 +370,32 @@ def primary_bot_loop():
             time.sleep(60)
 
 if __name__ == "__main__":
-    try:
-        base_port = int(os.getenv("PORT", 8080))
-    except ValueError:
-        logging.warning("Invalid PORT environment variable, defaulting to 8080")
+    port_env = os.getenv("PORT")
+    if port_env:
+        try:
+            base_port = int(port_env)
+            port_options = [base_port]
+        except ValueError:
+            logging.warning("Invalid PORT environment variable, defaulting to 8080")
+            base_port = 8080
+            port_options = list(range(base_port, base_port + 10))
+    else:
         base_port = 8080
+        port_options = list(range(base_port, base_port + 10))
 
     bot_thread = threading.Thread(target=primary_bot_loop)
     bot_thread.daemon = True
     bot_thread.start()
 
-    # Try to bind to a sequence of ports (base_port .. base_port+9) to avoid
-    # immediate failure if the default port is already in use.
+    if port_env:
+        logging.info("PORT environment variable detected; binding to configured port %s only.", base_port)
+    else:
+        logging.info("No PORT environment variable detected; attempting local port range %s-%s.", base_port, base_port + 9)
+
     HTTPServer.allow_reuse_address = True
     httpd = None
     bound_port = None
-    for port in range(base_port, base_port + 10):
+    for port in port_options:
         try:
             server_address = ('0.0.0.0', port)
             httpd = HTTPServer(server_address, HealthCheckServer)
@@ -393,7 +406,8 @@ if __name__ == "__main__":
             continue
 
     if httpd is None:
-        logging.error(f"Failed to bind to any port in range {base_port}-{base_port+9}. Exiting.")
+        target_range = f"{base_port}" if port_env else f"{base_port}-{base_port+9}"
+        logging.error(f"Failed to bind to port(s) {target_range}. Exiting.")
         sys.exit(1)
 
     try:
