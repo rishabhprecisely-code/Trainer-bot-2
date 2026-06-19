@@ -46,7 +46,7 @@ def load_local_env():
 
 # --- CONFIGURATION ---
 load_local_env()
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/channels/1516512095930290206/1516512096697974848/1517251210015408129").strip() or None
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1517392718488146020/DUU6wmDxpN8frACA2moHluDSageqctmANKsF6Hyd0kFGvw_XjI4oe2dnZo4VogYOUZJxb").strip() or None
 if DISCORD_WEBHOOK_URL:
     logging.info('Discord webhook is configured and ready for alert dispatch.')
 else:
