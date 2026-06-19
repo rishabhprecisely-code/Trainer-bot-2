@@ -9,5 +9,5 @@ services:
       - PORT=8080
       - STATUS_TOKEN=your-secret-token
       - DATA_SOURCE=coingecko
-      - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1516867950706032691/jbkI3AtCR2LPIoLvEzSZkZOU5WpN5w28mJEqrm2tKpYYbTFyuEEQ3vVHl1fsQ0lE4TGJ
+      - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1517392718488146020/DUU6wmDxpN8frACA2moHluDSageqctmANKsF6Hyd0kFGvw_XjI4oe2dnZo4VogYOUZJxb
     restart: unless-stopped
