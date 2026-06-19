@@ -91,7 +91,8 @@ docker compose up --build -d
 Notes:
 - The bot will attempt to bind `PORT` (default 8080) and will try the next 9 ports if the base port is unavailable.
 - When deploying under a process manager, prefer using the `PORT` env var to control the listen port.
-- Set `DISCORD_WEBHOOK_URL` to your webhook URL for alert delivery.
+- Set `DISCORD_WEBHOOK_URL` to your webhook URL for alert delivery. It must be in the format `https://discord.com/api/webhooks/<webhook_id>/<webhook_token>`.
+- Do not use a channel URL such as `https://discord.com/channels/...` or a webhook viewer URL; those will return 401/405 errors.
 - Set `STATUS_TOKEN` to protect the `/status` endpoint via `Authorization: Bearer <STATUS_TOKEN>` or `?token=<STATUS_TOKEN>`.
 - Use `DATA_SOURCE=coingecko` when running in Railway or other restricted environments to avoid yfinance rate limits.
 - By default, the bot now uses `coingecko` first and falls back to `yfinance` only if CoinGecko fails.

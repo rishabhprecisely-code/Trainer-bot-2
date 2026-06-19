@@ -44,11 +44,20 @@ def load_local_env():
         logging.warning('Failed to load local .env file: %s', exc)
 
 
+def is_valid_discord_webhook_url(url):
+    return isinstance(url, str) and url.startswith("https://discord.com/api/webhooks/")
+
+
 # --- CONFIGURATION ---
 load_local_env()
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 DISCORD_WEBHOOK_URL = DISCORD_WEBHOOK_URL.strip() if DISCORD_WEBHOOK_URL else None
 if DISCORD_WEBHOOK_URL:
+    if not is_valid_discord_webhook_url(DISCORD_WEBHOOK_URL):
+        logging.warning(
+            'Discord webhook URL appears malformed. Use the exact format: '
+            'https://discord.com/api/webhooks/<webhook_id>/<webhook_token>. '
+            'Current value: %s', DISCORD_WEBHOOK_URL)
     logging.info('Discord webhook is configured and ready for alert dispatch.')
 else:
     logging.warning('Discord webhook URL is not configured; alert dispatch will be skipped.')
@@ -79,7 +88,22 @@ def send_alert(message, embed_color=3447003):
     }
     try:
         resp = requests.post(DISCORD_WEBHOOK_URL, json=data, timeout=10)
-        if resp.status_code >= 400:
+        if resp.status_code == 401:
+            logging.warning(
+                "Discord webhook request failed with 401 Invalid Webhook Token. "
+                "Verify DISCORD_WEBHOOK_URL and that the webhook token has not been deleted."
+            )
+        elif resp.status_code == 404:
+            logging.warning(
+                "Discord webhook request failed with 404 Not Found. "
+                "Check the webhook URL and whether the webhook still exists."
+            )
+        elif resp.status_code == 405:
+            logging.warning(
+                "Discord webhook request failed with 405 Method Not Allowed. "
+                "Ensure DISCORD_WEBHOOK_URL is a webhook endpoint, not a channel URL."
+            )
+        elif resp.status_code >= 400:
             logging.warning("Discord webhook request failed with status %s: %s", resp.status_code, resp.text)
     except Exception:
         logging.exception("Network dispatch failure while sending alert")
