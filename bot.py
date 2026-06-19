@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 import pandas as pd
 import requests
 import yfinance as yf
+from typing import Any, Mapping, Optional, Tuple, cast
 from logging.handlers import RotatingFileHandler
 
 
@@ -120,8 +121,9 @@ class DiscordWebhookClient:
     def enabled(self) -> bool:
         return bool(self.webhook_url)
 
-    def send_embed(self, title: str, description: str, color: int = 3447003) -> None:
-        if not self.enabled:
+    def send_embed(self, title: str, description: Optional[str] = None, color: int = 3447003) -> None:
+        # check webhook_url directly to avoid optional-member static warnings
+        if not self.webhook_url:
             logging.warning('Discord webhook is disabled. Alerts will be skipped.')
             return
 
@@ -132,7 +134,7 @@ class DiscordWebhookClient:
         payload = {
             'embeds': [{
                 'title': title,
-                'description': description,
+                'description': description or '',
                 'color': color,
                 'footer': {'text': 'Yahoo Finance Secure Scraper Engine'},
                 'timestamp': datetime.now(timezone.utc).isoformat(),
@@ -150,11 +152,11 @@ class DiscordWebhookClient:
             return
 
         if resp.status_code == 401:
-            logging.warning('Discord webhook responded 401 Invalid Webhook Token. Verify the webhook token and URL.')
+            logging.warning('Discord webhook responded 401: invalid webhook token.')
         elif resp.status_code == 404:
-            logging.warning('Discord webhook responded 404 Not Found. Verify the webhook URL exists and is correct.')
+            logging.warning('Discord webhook responded 404: webhook URL not found.')
         elif resp.status_code == 405:
-            logging.warning('Discord webhook responded 405 Method Not Allowed. Ensure the URL is a webhook endpoint, not a channel or message URL.')
+            logging.warning('Discord webhook responded 405: method not allowed for webhook endpoint.')
         else:
             logging.warning('Discord webhook request failed with status %s: %s', resp.status_code, resp.text)
 
@@ -162,7 +164,7 @@ class DiscordWebhookClient:
 def build_request_session() -> requests.Session:
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (iPad; CPU OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/605.1.15',
+        'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0; +https://example.com/bot)',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
         'Origin': 'https://finance.yahoo.com',
@@ -183,7 +185,9 @@ def calculate_rsi(prices: pd.Series, window: int = 14) -> pd.Series:
     gain = delta.where(delta > 0, 0.0).rolling(window=window).mean()
     loss = (-delta.where(delta < 0, 0.0)).rolling(window=window).mean()
     rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    result = 100 - (100 / (1 + rs))
+    # ensure a pandas Series return with the same index as input
+    return pd.Series(result, index=prices.index)
 
 
 def fetch_coingecko_price_data(symbol: str, days: int = 7, interval: str = 'hourly') -> pd.DataFrame | None:
@@ -204,12 +208,12 @@ def fetch_coingecko_price_data(symbol: str, days: int = 7, interval: str = 'hour
                     logging.warning('CoinGecko returned empty price data for %s', symbol)
                     break
 
-                df = pd.DataFrame(prices, columns=['timestamp', 'close'])
+                df: pd.DataFrame = pd.DataFrame(prices, columns=['timestamp', 'close'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
                 df['close'] = df['close'].astype(float)
 
                 if volumes:
-                    volume_df = pd.DataFrame(volumes, columns=['timestamp', 'volume'])
+                    volume_df: pd.DataFrame = pd.DataFrame(volumes, columns=['timestamp', 'volume'])
                     volume_df['timestamp'] = pd.to_datetime(volume_df['timestamp'], unit='ms', utc=True)
                     df = df.merge(volume_df, on='timestamp', how='left')
                 else:
@@ -219,14 +223,14 @@ def fetch_coingecko_price_data(symbol: str, days: int = 7, interval: str = 'hour
                 df['open'] = df['close']
                 df['high'] = df['close']
                 df['low'] = df['close']
-                return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+                return cast(pd.DataFrame, df[['timestamp', 'open', 'high', 'low', 'close', 'volume']])
 
             if resp.status_code == 429:
                 logging.warning('CoinGecko rate limited attempt %s/%s for %s', attempt, FETCH_RETRY_COUNT, symbol)
             else:
                 logging.warning('CoinGecko API returned status %s for %s', resp.status_code, symbol)
         except requests.RequestException as exc:
-            logging.warning('CoinGecko request failed for %s attempt %s/%s: %s', symbol, attempt, FETCH_RETRY_COUNT, exc)
+            logging.warning('CoinGecko request failed for %s: %s', symbol, exc)
 
         if attempt < FETCH_RETRY_COUNT:
             time.sleep(FETCH_RETRY_DELAY)
@@ -250,6 +254,50 @@ def fetch_yfinance_price_data(symbol: str, timeframe: str, days: int = 7) -> pd.
     except Exception as exc:
         logging.warning('yfinance fetch failed for %s: %s', symbol, exc)
         return None
+
+
+def fetch_coingecko_spot_price(symbol: str) -> float | None:
+    base = symbol.split('-')[0].upper()
+    mapping = {'BTC': 'bitcoin', 'ETH': 'ethereum', 'DOGE': 'dogecoin', 'LTC': 'litecoin'}
+    coin = mapping.get(base, base.lower())
+    url = 'https://api.coingecko.com/api/v3/simple/price'
+
+    session = build_request_session()
+    try:
+        resp = session.get(url, params={'ids': coin, 'vs_currencies': 'usd'}, timeout=15)
+        if resp.status_code != 200:
+            logging.warning('CoinGecko spot price request failed for %s with status %s', symbol, resp.status_code)
+            return None
+
+        data = resp.json()
+        price = data.get(coin, {}).get('usd')
+        return float(price) if price is not None else None
+    except requests.RequestException as exc:
+        logging.warning('CoinGecko spot price request failed for %s: %s', symbol, exc)
+        return None
+    except (TypeError, ValueError) as exc:
+        logging.warning('CoinGecko spot price parse failed for %s: %s', symbol, exc)
+        return None
+
+
+def fetch_yfinance_spot_price(symbol: str) -> float | None:
+    try:
+        ticker = yf.Ticker(symbol)
+        fast_info = getattr(ticker, 'fast_info', None)
+        if fast_info:
+            price = fast_info.get('last_price') or fast_info.get('lastPrice') or fast_info.get('lastPrice')
+            if price is not None:
+                return float(price)
+
+        info = getattr(ticker, 'info', None)
+        if isinstance(info, dict):
+            for key in ('regularMarketPrice', 'currentPrice', 'lastPrice', 'previousClose'):
+                price = info.get(key)
+                if price is not None:
+                    return float(price)
+    except Exception as exc:
+        logging.warning('yfinance spot price fetch failed for %s: %s', symbol, exc)
+    return None
 
 
 def run_predictive_learning(df: pd.DataFrame) -> tuple[float, float, int, float, float]:
@@ -291,7 +339,20 @@ def run_predictive_learning(df: pd.DataFrame) -> tuple[float, float, int, float,
     return bullish_probability, bearish_probability, total_matches, avg_pct_change, vol_pct
 
 
-def build_alert_message(symbol: str, direction: str, current_price: float, current_rsi: float, matches: int, bull_prob: float, bear_prob: float, avg_pct_change: float, vol_pct: float, expected_target: float | None, expected_range_low: float | None, expected_range_high: float | None) -> tuple[str, int]:
+def build_alert_message(
+    symbol: str,
+    direction: str,
+    current_price: float,
+    current_rsi: float,
+    matches: int,
+    bull_prob: float,
+    bear_prob: float,
+    avg_pct_change: float,
+    vol_pct: float,
+    expected_target: float | None,
+    expected_range_low: float | None,
+    expected_range_high: float | None,
+) -> tuple[str, int]:
     if direction == 'bullish':
         title = '📈 RECOMMENDED ACTION: BUY / LONG'
         color = 3066993
@@ -308,9 +369,17 @@ def build_alert_message(symbol: str, direction: str, current_price: float, curre
     expected_section = ''
     if expected_target is not None and expected_range_low is not None and expected_range_high is not None:
         expected_section = (
-            f'**Expected Target (1h):** ${expected_target:,.2f} ({avg_pct_change:+.2f}% avg, volatility {vol_pct:.2f}%)\n'
+            f'**Expected Target (1h):** ${expected_target:,.2f} ({avg_pct_change:+.2f}% avg)\n'
             f'**Expected Range (1h):** ${expected_range_low:,.2f} — ${expected_range_high:,.2f}\n\n'
         )
+
+    # Build a readable directional note instead of embedding long replacements inline
+    if direction == 'bullish':
+        directional_note = 'Strong bullish reversal pressure expected next hour.'
+    elif direction == 'bearish':
+        directional_note = 'Strong bearish distribution pressure expected next hour.'
+    else:
+        directional_note = 'Consolidation mode expected.'
 
     message = (
         f'{title}\n\n'
@@ -321,7 +390,7 @@ def build_alert_message(symbol: str, direction: str, current_price: float, curre
         f'📊 **Predictive Pattern Learning:**\n'
         f'Verified **{matches} matches** over the last 7 days matching this RSI profile.\n'
         f'{summary}\n\n'
-        f'*Directional Outlook:* {direction.replace("bullish", "Strong bullish reversal pressure expected next hour.").replace("bearish", "Strong bearish distribution pressure expected next hour.").replace("neutral", "Consolidation mode expected.")}*'
+        f'*Directional Outlook:* {directional_note}*'
     )
 
     return message, color
@@ -337,16 +406,24 @@ def fetch_and_analyze(config: Config | None = None, webhook_client: DiscordWebho
     logging.info('Beginning analysis cycle for %s at %s', config.symbol, datetime.now(timezone.utc).isoformat())
 
     df = None
+    spot_price = None
+
     if config.data_source == 'coingecko':
+        spot_price = fetch_coingecko_spot_price(config.symbol)
         df = fetch_coingecko_price_data(config.symbol, days=7, interval='hourly')
         if df is None or df.empty:
             logging.warning('Primary source CoinGecko failed; falling back to yfinance.')
             df = fetch_yfinance_price_data(config.symbol, config.timeframe)
+            if spot_price is None:
+                spot_price = fetch_yfinance_spot_price(config.symbol)
     else:
+        spot_price = fetch_yfinance_spot_price(config.symbol)
         df = fetch_yfinance_price_data(config.symbol, config.timeframe)
         if df is None or df.empty:
             logging.warning('Primary source yfinance failed; falling back to CoinGecko.')
             df = fetch_coingecko_price_data(config.symbol, days=7, interval='hourly')
+            if spot_price is None:
+                spot_price = fetch_coingecko_spot_price(config.symbol)
 
     if df is None or df.empty:
         logging.warning('No price data available for analysis. Ending cycle.')
@@ -362,8 +439,12 @@ def fetch_and_analyze(config: Config | None = None, webhook_client: DiscordWebho
 
     df = df[['open', 'high', 'low', 'close', 'volume']].copy()
     df['close'] = df['close'].astype(float)
-    df['rsi'] = calculate_rsi(df['close'])
-    df = df.dropna(subset=['rsi']).copy()
+    # ensure close column is a Series for type checkers
+    close_series = pd.Series(df['close'])
+    df['rsi'] = calculate_rsi(close_series)
+    # pandas-stubs may be strict about dropna signature; ignore here
+    df = df.dropna(subset=['rsi'])  # type: ignore[call-arg]
+    df = df.copy()
     if len(df) < 5:
         logging.warning('Not enough price data after RSI calculation: %s rows', len(df))
         return
@@ -371,6 +452,10 @@ def fetch_and_analyze(config: Config | None = None, webhook_client: DiscordWebho
     current_price = float(df['close'].iloc[-1])
     current_rsi = float(df['rsi'].iloc[-1])
     prev_rsi = float(df['rsi'].iloc[-2])
+
+    if spot_price is not None:
+        logging.info('Using spot price %s for %s (overriding latest close).', spot_price, config.symbol)
+        current_price = spot_price
 
     bull_prob, bear_prob, matches, avg_pct_change, vol_pct = run_predictive_learning(df)
     expected_target = None
@@ -453,16 +538,32 @@ class HealthCheckServer(BaseHTTPRequestHandler):
         return
 
 
-def verify_status_request(headers, query_params):
+def verify_status_request(headers: Any, query_params: Mapping[str, Any]) -> bool:
     token = os.getenv('STATUS_TOKEN')
     if not token:
         return True
 
-    auth = headers.get('Authorization')
-    if auth and auth.strip().lower().startswith('bearer '):
+    auth = None
+    try:
+        auth = headers.get('Authorization')  # type: ignore[attr-defined]
+    except Exception:
+        # headers may be a mapping-like object without .get
+        try:
+            auth = headers['Authorization']  # type: ignore[index]
+        except Exception:
+            auth = None
+
+    if isinstance(auth, str) and auth.strip().lower().startswith('bearer '):
         return auth.strip()[7:] == token
 
-    query_token = query_params.get('token')
+    query_token = None
+    try:
+        query_token = query_params.get('token')  # type: ignore[attr-defined]
+    except Exception:
+        try:
+            query_token = query_params['token']  # type: ignore[index]
+        except Exception:
+            query_token = None
     if query_token and query_token[0] == token:
         return True
 

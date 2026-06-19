@@ -1,0 +1,16 @@
+{
+  "python.linting.flake8Enabled": true,
+  "python.linting.flake8Args": ["--config", ".flake8"],
+  "python.analysis.exclude": ["**/.venv/**", "**/site-packages/**"],
+  "python.analysis.autoSearchPaths": true,
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.extraPaths": ["."],
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingTypeStubs": "none",
+    "reportOptionalMemberAccess": "warning"
+  },
+  "python.linting.enabled": true,
+  "files.exclude": {
+    "**/.venv": true
+  }
+}

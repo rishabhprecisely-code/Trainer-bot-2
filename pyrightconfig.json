@@ -1,0 +1,10 @@
+{
+  "typeCheckingMode": "basic",
+  "exclude": [
+    "**/.venv/**",
+    "**/site-packages/**",
+    "**/node_modules/**"
+  ],
+  "reportMissingTypeStubs": false,
+  "reportOptionalMemberAccess": "warning"
+}
