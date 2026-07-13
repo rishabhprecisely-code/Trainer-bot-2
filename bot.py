@@ -14,7 +14,7 @@ import argparse
 import pandas as pd
 import requests
 import yfinance as yf
-from typing import Any, Mapping, Optional, cast
+from typing import Any, Mapping, Optional
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -29,7 +29,7 @@ TIMEFRAME = "1h"
 FETCH_RETRY_COUNT = 3
 FETCH_RETRY_DELAY = 2
 
-LAST_STATUS = {}
+LAST_STATUS: dict[str, object] = {}
 
 
 def setup_logging():
@@ -227,11 +227,13 @@ def fetch_coingecko_price_data(symbol: str, days: int = 7, interval: str = "hour
                 else:
                     df["volume"] = 0.0
 
-                df = df.sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
-                df["open"] = df["close"]
-                df["high"] = df["close"]
-                df["low"] = df["close"]
-                return cast(pd.DataFrame, df[["timestamp", "open", "high", "low", "close", "volume"]])
+                df = df.sort_values('timestamp').drop_duplicates('timestamp').reset_index(drop=True)
+                df['open'] = df['close']
+                df['high'] = df['close']
+                df['low'] = df['close']
+                result = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].copy()
+                assert isinstance(result, pd.DataFrame)
+                return result
 
             if resp.status_code == 429:
                 logging.warning("CoinGecko rate limited attempt %s/%s for %s", attempt, FETCH_RETRY_COUNT, symbol)
@@ -386,7 +388,7 @@ def persist_price_data(df: pd.DataFrame, symbol: str) -> Path:
 
 
 def generate_market_signals(config: Config, webhook_client: DiscordWebhookClient | None = None) -> None:
-    """Fetch ~2 days of data, persist it, compute RSI and produce three signals with expected ranges, send to Discord."""
+    """Fetch ~2 days of data, persist it, compute RSI and produce signals with ranges, then send to Discord."""
     if webhook_client is None:
         webhook_client = DiscordWebhookClient(config.discord_webhook_url)
 
@@ -474,7 +476,8 @@ def generate_market_signals(config: Config, webhook_client: DiscordWebhookClient
     for s in signals:
         lines.append(
             f"{s['horizon_hours']}h — {s['direction'].upper()}: target ${s['expected_target']:,.2f}, "
-            f"range ${s['expected_low']:,.2f} — ${s['expected_high']:,.2f} (bull {s['probabilities']['bull']}% / bear {s['probabilities']['bear']}%)"
+            f"range ${s['expected_low']:,.2f} — ${s['expected_high']:,.2f} "
+            f"(bull {s['probabilities']['bull']}% / bear {s['probabilities']['bear']}%)"
         )
 
     message = "\n".join(lines)
