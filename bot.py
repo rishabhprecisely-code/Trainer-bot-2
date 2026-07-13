@@ -601,6 +601,45 @@ def main() -> None:
         logging.warning('DISCORD_WEBHOOK_URL is not configured. Alerts will not be sent.')
 
     webhook_client = DiscordWebhookClient(config.discord_webhook_url)
+    # Optionally start a lightweight Discord bot if explicitly enabled.
+    # Set `START_DISCORD_BOT=true` and provide `TOKEN` as a repository secret to enable.
+    try:
+        start_discord = os.getenv('START_DISCORD_BOT', 'false').strip().lower() == 'true'
+    except Exception:
+        start_discord = False
+    if start_discord:
+        def start_discord_bot_if_enabled():
+            token = os.getenv('TOKEN')
+            if not token:
+                logging.warning('START_DISCORD_BOT is set but TOKEN is missing. Skipping Discord bot startup.')
+                return
+            try:
+                import discord
+                from discord.ext import commands
+            except Exception as exc:
+                logging.warning('Discord library not available; cannot start Discord bot: %s', exc)
+                return
+
+            bot = commands.Bot(command_prefix='!')
+
+            @bot.event
+            async def on_ready():
+                logging.info('Discord bot logged in as %s', bot.user)
+
+            @bot.command()
+            async def ping(ctx):
+                await ctx.send('Pong!')
+
+            def _run():
+                try:
+                    bot.run(token)
+                except Exception as exc:
+                    logging.exception('Discord bot runtime error: %s', exc)
+
+            t = threading.Thread(target=_run, name='discord-bot-thread', daemon=True)
+            t.start()
+
+        start_discord_bot_if_enabled()
     thread = threading.Thread(target=bot_loop, args=(config, webhook_client), daemon=True)
     thread.start()
 
