@@ -48,22 +48,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push to GHCR
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/trainer-bot-2:latest
-            ghcr.io/${{ github.repository_owner }}/trainer-bot-2:${{ github.sha }}
+      - name: Build Docker image (manual)
+        run: |
+          set -euo pipefail
+          echo "Building image..."
+          docker build -t ghcr.io/${{ github.repository_owner }}/trainer-bot-2:latest \
+            -t ghcr.io/${{ github.repository_owner }}/trainer-bot-2:${{ github.sha }} . 2>&1 | tee /tmp/docker-build.log
+
+      - name: Push Docker images to GHCR (manual)
+        run: |
+          set -euo pipefail
+          echo "Pushing latest tag..."
+          docker push ghcr.io/${{ github.repository_owner }}/trainer-bot-2:latest 2>&1 | tee /tmp/docker-push-latest.log || true
+          echo "Pushing sha tag..."
+          docker push ghcr.io/${{ github.repository_owner }}/trainer-bot-2:${{ github.sha }} 2>&1 | tee /tmp/docker-push-sha.log || true
+
       - name: List local Docker images (debug)
         run: |
           docker images --format '{{json .}}' > /tmp/docker-images.json || true
+
       - name: Upload build diagnostics
         uses: actions/upload-artifact@v4
         with:
           name: build-diagnostics-${{ github.run_number }}
-          path: /tmp/docker-images.json
+          path: |
+            /tmp/docker-build.log
+            /tmp/docker-push-latest.log
+            /tmp/docker-push-sha.log
+            /tmp/docker-images.json
 
     smoke-test:
       name: Runtime smoke test (runs container on runner)
