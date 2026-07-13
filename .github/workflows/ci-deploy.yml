@@ -5,9 +5,9 @@ on:
     branches: [ main ]
 
 jobs:
-  test-and-deploy:
+  test:
+    name: Run tests
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,10 +26,18 @@ jobs:
         run: |
           pytest -q
 
+  build-and-push:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    needs: test
+    if: needs.test.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v2
         with:
-          # Accept multiple possible secret names to be flexible for users.
           username: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME || github.actor }}
           password: ${{ secrets.DOCKERHUB_TOKEN || secrets.TOKEN }}
 
@@ -39,5 +47,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/trainer-bot-2:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/trainer-bot-2:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME || github.actor }}/trainer-bot-2:latest
+            ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME || github.actor }}/trainer-bot-2:${{ github.sha }}
