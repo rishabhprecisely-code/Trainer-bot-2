@@ -9,12 +9,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+import argparse
 
 import pandas as pd
 import requests
 import yfinance as yf
 from typing import Any, Mapping, Optional, Tuple, cast
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 
 LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
@@ -339,6 +341,152 @@ def run_predictive_learning(df: pd.DataFrame) -> tuple[float, float, int, float,
     return bullish_probability, bearish_probability, total_matches, avg_pct_change, vol_pct
 
 
+def _ensure_data_dir() -> Path:
+    data_dir = Path(os.path.dirname(__file__)) / 'data'
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def persist_price_data(df: pd.DataFrame, symbol: str) -> Path:
+    """Append new price rows to a rolling CSV for the symbol and keep last 48 hours."""
+    data_dir = _ensure_data_dir()
+    path = data_dir / f'{symbol.replace("/", "-")}_prices.csv'
+    # standardize columns
+    df_to_save = df.copy()
+    if 'timestamp' in df_to_save.columns:
+        df_to_save['timestamp'] = pd.to_datetime(df_to_save['timestamp'])
+        df_to_save = df_to_save.set_index('timestamp')
+    df_to_save = df_to_save[['open', 'high', 'low', 'close', 'volume']]
+
+    if path.exists():
+        try:
+            existing = pd.read_csv(path, parse_dates=['timestamp'], index_col='timestamp')
+            combined = pd.concat([existing, df_to_save])
+            combined = combined[~combined.index.duplicated(keep='last')]
+        except Exception:
+            combined = df_to_save
+    else:
+        combined = df_to_save
+
+    # keep last 48 hours (approximate by 48*3600 seconds)
+    try:
+        cutoff = pd.Timestamp.utcnow() - pd.Timedelta(hours=48)
+        combined = combined[combined.index >= cutoff]
+    except Exception:
+        pass
+
+    combined.reset_index().to_csv(path, index=False)
+    return path
+
+
+def generate_market_signals(config: Config, webhook_client: DiscordWebhookClient | None = None) -> None:
+    """Fetch ~2 days of data, persist it, compute RSI and produce three signals with expected ranges, send to Discord."""
+    if webhook_client is None:
+        webhook_client = DiscordWebhookClient(config.discord_webhook_url)
+
+    # Try primary source then fallback
+    df = None
+    try:
+        if config.data_source == 'coingecko':
+            df = fetch_coingecko_price_data(config.symbol, days=2, interval='hourly')
+            if df is None or df.empty:
+                df = fetch_yfinance_price_data(config.symbol, config.timeframe)
+        else:
+            df = fetch_yfinance_price_data(config.symbol, config.timeframe)
+            if df is None or df.empty:
+                df = fetch_coingecko_price_data(config.symbol, days=2, interval='hourly')
+    except Exception as exc:
+        logging.warning('Failed to fetch market data for signals: %s', exc)
+        return
+
+    if df is None or df.empty:
+        logging.warning('No data available to generate signals.')
+        return
+
+    # Normalize dataframe
+    if 'timestamp' not in df.columns and 'Date' in df.columns:
+        df = df.rename(columns={'Date': 'timestamp'})
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    else:
+        # try to use index as datetime
+        try:
+            df = df.reset_index()
+            df['timestamp'] = pd.to_datetime(df['index'])
+        except Exception:
+            df['timestamp'] = pd.Timestamp.utcnow()
+
+    # standardize lowercase column names
+    df.columns = [str(c).lower() for c in df.columns]
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        if col not in df.columns:
+            df[col] = df.get(col.capitalize(), 0.0)
+
+    path = persist_price_data(df[['timestamp', 'open', 'high', 'low', 'close', 'volume']], config.symbol)
+    logging.info('Persisted price data to %s', path)
+
+    # compute RSI and predictive metrics
+    close_series = pd.Series(df['close'].astype(float))
+    df['rsi'] = calculate_rsi(close_series)
+    df = df.dropna(subset=['rsi'])
+    if df.empty:
+        logging.warning('Not enough data after RSI calculation to generate signals.')
+        return
+
+    bull_prob, bear_prob, matches, avg_pct_change, vol_pct = run_predictive_learning(df)
+
+    current_price = float(df['close'].iloc[-1])
+    current_rsi = float(df['rsi'].iloc[-1])
+
+    # Prepare three horizons: 1h, 3h, 6h (scale expected change and volatility)
+    horizons = [(1, 1.0), (3, 3.0), (6, 6.0)]
+    signals = []
+    for label, factor in horizons:
+        expected_target = current_price * (1 + (avg_pct_change * factor) / 100.0)
+        expected_low = current_price * (1 + ((avg_pct_change - vol_pct) * factor) / 100.0)
+        expected_high = current_price * (1 + ((avg_pct_change + vol_pct) * factor) / 100.0)
+        if bull_prob > bear_prob and bull_prob > 50:
+            direction = 'bullish'
+        elif bear_prob > bull_prob and bear_prob > 50:
+            direction = 'bearish'
+        else:
+            direction = 'neutral'
+
+        signals.append({
+            'horizon_hours': label,
+            'direction': direction,
+            'expected_target': expected_target,
+            'expected_low': expected_low,
+            'expected_high': expected_high,
+            'probabilities': {'bull': round(bull_prob, 2), 'bear': round(bear_prob, 2)},
+        })
+
+    # Build message
+    lines = [f'Market Signals for {config.symbol} (price ${current_price:,.2f}, RSI {current_rsi:.2f})\n']
+    for s in signals:
+        lines.append(
+            f"{s['horizon_hours']}h — {s['direction'].upper()}: target ${s['expected_target']:,.2f}, "
+            f"range ${s['expected_low']:,.2f} — ${s['expected_high']:,.2f} (bull {s['probabilities']['bull']}% / bear {s['probabilities']['bear']}%)"
+        )
+
+    message = '\n'.join(lines)
+    logging.info('Generated signals: %s', message)
+
+    try:
+        webhook_client.send_embed('📡 MARKET SIGNALS', message, color=3447003)
+    except Exception as exc:
+        logging.warning('Failed to send webhook for signals: %s', exc)
+
+    # update LAST_STATUS with summary
+    LAST_STATUS.update({
+        'symbol': config.symbol,
+        'price': current_price,
+        'rsi': current_rsi,
+        'signals': signals,
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+    })
+
+
 def build_alert_message(
     symbol: str,
     direction: str,
@@ -577,7 +725,12 @@ def bot_loop(config: Config, webhook_client: DiscordWebhookClient) -> None:
 
     while True:
         try:
+            # Run both analysis and signal generation each cycle
             fetch_and_analyze(config, webhook_client)
+            try:
+                generate_market_signals(config, webhook_client)
+            except Exception as exc:
+                logging.exception('generate_market_signals failed: %s', exc)
         except Exception as exc:
             logging.exception('Unexpected error in fetch_and_analyze: %s', exc)
         time.sleep(config.check_interval)
@@ -648,6 +801,15 @@ def main() -> None:
         logging.info('Discord TOKEN present (masked): %s', display)
     else:
         logging.info('Discord TOKEN not present in environment.')
+    # CLI: allow running only signal generation (for Railway scheduled jobs)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--signals-only', action='store_true', help='Run signal generator once and exit')
+    args = parser.parse_args()
+
+    if args.signals_only:
+        generate_market_signals(config, webhook_client)
+        return
+
     thread = threading.Thread(target=bot_loop, args=(config, webhook_client), daemon=True)
     thread.start()
 
