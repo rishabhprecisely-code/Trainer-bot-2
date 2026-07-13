@@ -640,6 +640,14 @@ def main() -> None:
             t.start()
 
         start_discord_bot_if_enabled()
+
+    # Log whether a Discord token is present (masked) for runtime debugging.
+    token = os.getenv('TOKEN')
+    if token:
+        display = f"***{len(token) - 6}***" if len(token) > 6 else "***"
+        logging.info('Discord TOKEN present (masked): %s', display)
+    else:
+        logging.info('Discord TOKEN not present in environment.')
     thread = threading.Thread(target=bot_loop, args=(config, webhook_client), daemon=True)
     thread.start()
 
