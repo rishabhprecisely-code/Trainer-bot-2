@@ -56,6 +56,14 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/trainer-bot-2:latest
             ghcr.io/${{ github.repository_owner }}/trainer-bot-2:${{ github.sha }}
+      - name: List local Docker images (debug)
+        run: |
+          docker images --format '{{json .}}' > /tmp/docker-images.json || true
+      - name: Upload build diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics-${{ github.run_number }}
+          path: /tmp/docker-images.json
 
     smoke-test:
       name: Runtime smoke test (runs container on runner)
@@ -100,7 +108,19 @@ jobs:
 
             if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
               echo "Smoke test failed; dumping container logs:" && docker logs trainer-smoke || true
+              docker logs trainer-smoke > /tmp/trainer-smoke.log || true
               docker rm -f trainer-smoke || true
+              echo "Uploading smoke-test artifacts"
+              ls -la /tmp || true
+              cat /tmp/trainer-smoke.log || true
               exit 1
             fi
+            docker logs trainer-smoke > /tmp/trainer-smoke.log || true
             docker rm -f trainer-smoke || true
+        - name: Upload smoke-test artifacts
+          uses: actions/upload-artifact@v4
+          with:
+            name: smoke-test-artifacts-${{ github.run_number }}
+            path: |
+              /tmp/status.json
+              /tmp/trainer-smoke.log
