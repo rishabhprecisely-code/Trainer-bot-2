@@ -370,7 +370,7 @@ def persist_price_data(df: pd.DataFrame, symbol: str) -> Path:
 
     # keep last 48 hours (approximate by 48*3600 seconds)
     try:
-        cutoff = pd.Timestamp.utcnow() - pd.Timedelta(hours=48)
+        cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=48)
         combined = combined[combined.index >= cutoff]
     except Exception:
         pass
@@ -414,7 +414,7 @@ def generate_market_signals(config: Config, webhook_client: DiscordWebhookClient
             df = df.reset_index()
             df['timestamp'] = pd.to_datetime(df['index'])
         except Exception:
-            df['timestamp'] = pd.Timestamp.utcnow()
+            df['timestamp'] = pd.Timestamp.now(tz='UTC')
 
     # standardize lowercase column names
     df.columns = [str(c).lower() for c in df.columns]
