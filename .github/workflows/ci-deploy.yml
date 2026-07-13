@@ -79,9 +79,28 @@ jobs:
             TOKEN: ${{ secrets.TOKEN }}
             START_DISCORD_BOT: false
           run: |
-            docker run -d --name trainer-smoke -p 8080:8080 \
+            docker run -d --name trainer-smoke \
               -e START_DISCORD_BOT=${START_DISCORD_BOT} -e TOKEN=${TOKEN} \
               ghcr.io/${{ github.repository_owner }}/trainer-bot-2:latest || true
-            sleep 5
-            curl -v --fail http://127.0.0.1:8080/status || (docker logs trainer-smoke && exit 1)
+
+            # Wait for the container to be healthy/ready by polling the internal /status endpoint
+            ATTEMPTS=0
+            MAX_ATTEMPTS=12
+            SLEEP=5
+            until [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; do
+              if docker exec trainer-smoke curl -sS --fail http://127.0.0.1:8080/status > /tmp/status.json 2>/tmp/curl.err; then
+                echo "Smoke test passed. /status returned:" && cat /tmp/status.json
+                break
+              else
+                echo "Attempt $((ATTEMPTS+1)) failed. Curl output:" && cat /tmp/curl.err || true
+                ATTEMPTS=$((ATTEMPTS+1))
+                sleep $SLEEP
+              fi
+            done
+
+            if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
+              echo "Smoke test failed; dumping container logs:" && docker logs trainer-smoke || true
+              docker rm -f trainer-smoke || true
+              exit 1
+            fi
             docker rm -f trainer-smoke || true
