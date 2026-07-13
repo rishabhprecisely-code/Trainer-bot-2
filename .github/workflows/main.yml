@@ -1,0 +1,28 @@
+.github/workflows/bot.yml
+name: Run Discord Bot
+
+on:
+  push:
+  schedule:
+    - cron: "*/5 * * * *"  # runs every 5 minutes
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.10
+
+      - name: Install dependencies
+        run: pip install discord.py
+
+      - name: Run bot
+        run: python bot.py
+        env:
+          TOKEN: ${{ secrets.TOKEN }}
