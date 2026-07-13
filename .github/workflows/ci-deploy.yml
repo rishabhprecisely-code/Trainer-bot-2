@@ -3,6 +3,7 @@ name: CI and Deploy Docker Image
 on:
   push:
     branches: [ main ]
+  workflow_dispatch: {}
 
 # Allow the workflow to push to GitHub Container Registry using the
 # automatically provided GITHUB_TOKEN without external secrets.
