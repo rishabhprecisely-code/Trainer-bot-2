@@ -40,5 +40,5 @@ jobs:
           # Add any crypto API keys below if needed:
           # BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
         run: |
-          python main.py
+          python3 bot.py
           
