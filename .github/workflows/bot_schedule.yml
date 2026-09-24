@@ -1,13 +1,9 @@
 name: Run Bitcoin Bot
 
 on:
-  # Runs automatically on a fixed schedule
   schedule:
-    # Cron syntax: 'Minute Hour Day-of-Month Month Day-of-Week'
-    # '0 * * * *' means top of every hour (24 times a day)
+    # Runs at the top of every hour
     - cron: '0 * * * *'
-
-  # Allows you to manually trigger the bot anytime from the GitHub "Actions" tab
   workflow_dispatch:
 
 jobs:
@@ -15,30 +11,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Check out your repository code into the virtual environment
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Step 2: Set up Python environment
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # Step 3: Install required libraries from your requirements.txt file
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # Step 4: Run your main Python script with secure environment variables
       - name: Run Python Script
-        env:
-          # Maps GitHub Secrets to environment variables your code can read
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Add any crypto API keys below if needed:
-          # BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
         run: |
-          python3 bot.py
-          
+          python bot.py
